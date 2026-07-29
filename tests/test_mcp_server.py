@@ -45,18 +45,27 @@ def _mock_gl_factory(mr, changes, file_contents):
     return gl
 
 
-def _patch_settings(monkeypatch, token="tok", secret=""):
+def _patch_settings(monkeypatch, token="tok", secret="", github_token="ghp-test", openai_key="sk-test"):
     """patch get_settings 返回带 token 的配置。"""
     fake = MagicMock()
     fake.gitlab_url = "https://gitlab.example.com"
     fake.gitlab_token = token
     fake.webhook_secret = secret
+    fake.github_token = github_token
+    fake.github_webhook_secret = ""
+    fake.openai_api_key = openai_key
+    fake.openai_base_url = ""
+    fake.openai_model = "GLM-4.5-Air"
+    fake.llm_max_tokens = 4096
+    fake.llm_temperature = 0.2
     fake.max_files_per_review = 50
     fake.max_inline_comments = 20
     fake.max_file_size_bytes = 200_000
     fake.host = "0.0.0.0"
     fake.port = 8000
     monkeypatch.setattr(mcp_server, "get_settings", lambda: fake)
+    import llm_client
+    monkeypatch.setattr(llm_client, "get_settings", lambda: fake)
 
 
 # ---------------------------------------------------------------------------
@@ -358,3 +367,209 @@ async def test_tool_post_mr_comment_failure(monkeypatch):
     with patch("mcp_server.GitLabClient", return_value=gl):
         out = await mcp_server.post_mr_comment(42, 7, "hello")
     assert "❌" in out
+
+
+# ---------------------------------------------------------------------------
+# run_github_pr_review
+# ---------------------------------------------------------------------------
+
+def _make_pr():
+    from github_client import PullRequestInfo
+    return PullRequestInfo(
+        owner="owner", repo="repo", number=1,
+        title="feat: x", html_url="http://pr/1",
+        head_sha="abc123", base_sha="def456",
+    )
+
+
+def _make_pr_file(path: str, patch: str, status="modified"):
+    from github_client import PRFile
+    return PRFile(
+        filename=path, status=status, patch=patch,
+        additions=1, deletions=0, changes=1,
+    )
+
+
+def _mock_gh_factory(pr, files, file_contents):
+    """构建一个 mock GitHubClient。"""
+    gh = AsyncMock()
+    gh.get_pull_request = AsyncMock(return_value=pr)
+    gh.get_pr_files = AsyncMock(return_value=files)
+    gh.get_file_content = AsyncMock(side_effect=lambda o, r, p, ref: file_contents.get(p, ""))
+    gh.post_pr_comment = AsyncMock(return_value={"id": 1})
+    gh.post_pr_review_comment = AsyncMock(return_value={"id": 2})
+    gh.aclose = AsyncMock()
+    gh.__aenter__ = AsyncMock(return_value=gh)
+    gh.__aexit__ = AsyncMock(return_value=None)
+    return gh
+
+
+def _mock_llm_factory(findings):
+    """构建一个 mock LLMClient，返回指定的 findings。"""
+    llm = AsyncMock()
+    from llm_client import LLMReviewResult
+    llm.review_file = AsyncMock(return_value=LLMReviewResult(
+        findings=findings, raw_response="", token_usage={"total_tokens": 50}
+    ))
+    return llm
+
+
+async def test_github_review_no_github_token_returns_error(monkeypatch):
+    """无 GITHUB_TOKEN 时立即返回错误。"""
+    _patch_settings(monkeypatch, github_token="")
+    result = await mcp_server.run_github_pr_review("owner", "repo", 1)
+    assert result.error == "GITHUB_TOKEN 未配置"
+    assert result.reviewed_files == 0
+
+
+async def test_github_review_no_openai_key_returns_error(monkeypatch):
+    """无 OPENAI_API_KEY 时立即返回错误。"""
+    _patch_settings(monkeypatch, openai_key="")
+    result = await mcp_server.run_github_pr_review("owner", "repo", 1)
+    assert result.error == "OPENAI_API_KEY 未配置"
+    assert result.reviewed_files == 0
+
+
+async def test_github_review_pr_api_error(monkeypatch):
+    """GitHub API 获取 PR 失败时返回错误。"""
+    _patch_settings(monkeypatch)
+    from github_client import GitHubError
+    gh = _mock_gh_factory(_make_pr(), [], {})
+    gh.get_pull_request = AsyncMock(side_effect=GitHubError("404 not found"))
+    with patch("mcp_server.GitHubClient", return_value=gh):
+        result = await mcp_server.run_github_pr_review("owner", "repo", 1)
+    assert result.error is not None
+    assert "获取 PR 失败" in result.error
+    assert result.reviewed_files == 0
+
+
+async def test_github_review_success_with_findings(monkeypatch):
+    """成功使用 LLM 审查并发表评论的完整流程。"""
+    _patch_settings(monkeypatch)
+    patch_text = "@@ -1,1 +1,2 @@\n line1\n+let x = 0;"
+    pr_file = _make_pr_file("app/page.tsx", patch_text)
+    gh = _mock_gh_factory(_make_pr(), [pr_file], {"app/page.tsx": "line1\nlet x = 0;"})
+
+    from reviewer import Finding
+    finding = Finding(
+        rule_id="llm-review", file_path="app/page.tsx", line=2,
+        severity="high", message="use const", suggestion="change to const"
+    )
+    llm = _mock_llm_factory([finding])
+
+    with patch("mcp_server.GitHubClient", return_value=gh):
+        with patch("mcp_server.LLMClient", return_value=llm):
+            result = await mcp_server.run_github_pr_review("owner", "repo", 1, post_comments=True)
+
+    assert result.reviewed_files == 1
+    assert result.skipped_files == 0
+    assert len(result.findings) == 1
+    assert result.inline_comments_posted == 1
+    assert result.summary_posted is True
+    gh.post_pr_review_comment.assert_called()
+    gh.post_pr_comment.assert_called_once()
+
+
+async def test_github_review_skips_deleted_files(monkeypatch):
+    """已删除文件不参与审查。"""
+    _patch_settings(monkeypatch)
+    pr_file = _make_pr_file("a.ts", "", status="removed")
+    gh = _mock_gh_factory(_make_pr(), [pr_file], {})
+    with patch("mcp_server.GitHubClient", return_value=gh):
+        result = await mcp_server.run_github_pr_review("owner", "repo", 1)
+    assert result.reviewed_files == 0
+    gh.get_file_content.assert_not_called()
+
+
+async def test_github_review_skips_unsupported_extensions(monkeypatch):
+    """非 TS/JS 扩展名的文件跳过。"""
+    _patch_settings(monkeypatch)
+    pr_file = _make_pr_file("README.md", "@@ -0,0 +1,1 @@\n+# title")
+    gh = _mock_gh_factory(_make_pr(), [pr_file], {})
+    with patch("mcp_server.GitHubClient", return_value=gh):
+        result = await mcp_server.run_github_pr_review("owner", "repo", 1)
+    assert result.reviewed_files == 0
+    gh.get_file_content.assert_not_called()
+
+
+async def test_github_review_skips_large_files(monkeypatch):
+    """超过大小限制的文件跳过。"""
+    fake = MagicMock()
+    fake.gitlab_url = "https://gitlab.example.com"
+    fake.gitlab_token = "tok"
+    fake.webhook_secret = ""
+    fake.github_token = "ghp-test"
+    fake.github_webhook_secret = ""
+    fake.openai_api_key = "sk-test"
+    fake.openai_base_url = ""
+    fake.openai_model = "GLM-4.5-Air"
+    fake.llm_max_tokens = 4096
+    fake.llm_temperature = 0.2
+    fake.max_files_per_review = 50
+    fake.max_inline_comments = 20
+    fake.max_file_size_bytes = 10  # 极小限制
+    fake.host = "0.0.0.0"
+    fake.port = 8000
+    monkeypatch.setattr(mcp_server, "get_settings", lambda: fake)
+    import llm_client
+    monkeypatch.setattr(llm_client, "get_settings", lambda: fake)
+
+    patch_text = "@@ -0,0 +1,1 @@\n+import { Icon } from \"react-icons\";"
+    pr_file = _make_pr_file("a.ts", patch_text)
+    gh = _mock_gh_factory(_make_pr(), [pr_file], {"a.ts": "x" * 100})
+    with patch("mcp_server.GitHubClient", return_value=gh):
+        result = await mcp_server.run_github_pr_review("owner", "repo", 1)
+    assert result.reviewed_files == 0
+    assert result.skipped_files == 1
+
+
+async def test_github_review_post_comments_false(monkeypatch):
+    """post_comments=False 时不发表任何评论。"""
+    _patch_settings(monkeypatch)
+    patch_text = "@@ -1,1 +1,2 @@\n line1\n+let x = 0;"
+    pr_file = _make_pr_file("a.ts", patch_text)
+    gh = _mock_gh_factory(_make_pr(), [pr_file], {"a.ts": "line1\nlet x = 0;"})
+    from reviewer import Finding
+    llm = _mock_llm_factory([Finding(
+        rule_id="llm-review", file_path="a.ts", line=2,
+        severity="medium", message="issue", suggestion="fix"
+    )])
+    with patch("mcp_server.GitHubClient", return_value=gh):
+        with patch("mcp_server.LLMClient", return_value=llm):
+            result = await mcp_server.run_github_pr_review("owner", "repo", 1, post_comments=False)
+    assert len(result.findings) == 1
+    assert result.inline_comments_posted == 0
+    assert result.summary_posted is False
+    gh.post_pr_review_comment.assert_not_called()
+    gh.post_pr_comment.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# GitHub MCP 工具
+# ---------------------------------------------------------------------------
+
+async def test_tool_review_github_pull_request_success(monkeypatch):
+    """review_github_pull_request 工具成功时返回汇总信息。"""
+    _patch_settings(monkeypatch)
+    patch_text = "@@ -1,1 +1,2 @@\n line1\n+let x = 0;"
+    pr_file = _make_pr_file("a.ts", patch_text)
+    gh = _mock_gh_factory(_make_pr(), [pr_file], {"a.ts": "line1\nlet x = 0;"})
+    from reviewer import Finding
+    llm = _mock_llm_factory([Finding(
+        rule_id="llm-review", file_path="a.ts", line=2,
+        severity="medium", message="issue", suggestion="fix"
+    )])
+    with patch("mcp_server.GitHubClient", return_value=gh):
+        with patch("mcp_server.LLMClient", return_value=llm):
+            out = await mcp_server.review_github_pull_request("owner", "repo", 1)
+    assert "✅" in out
+    assert "#1" in out
+    assert "owner/repo" in out
+
+
+async def test_tool_review_github_pull_request_error(monkeypatch):
+    """review_github_pull_request 工具失败时返回错误信息。"""
+    _patch_settings(monkeypatch, github_token="")
+    out = await mcp_server.review_github_pull_request("owner", "repo", 1)
+    assert "❌" in out
+    assert "GITHUB_TOKEN" in out

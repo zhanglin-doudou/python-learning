@@ -20,6 +20,9 @@ def settings_no_secret(monkeypatch):
     fake.gitlab_url = "https://gitlab.example.com"
     fake.gitlab_token = "tok"
     fake.webhook_secret = ""
+    fake.github_token = "ghp-test"
+    fake.github_webhook_secret = ""
+    fake.openai_api_key = "sk-test"
     fake.max_files_per_review = 50
     fake.max_inline_comments = 20
     fake.max_file_size_bytes = 200_000
@@ -36,6 +39,9 @@ def settings_with_secret(monkeypatch):
     fake.gitlab_url = "https://gitlab.example.com"
     fake.gitlab_token = "tok"
     fake.webhook_secret = "my-secret"
+    fake.github_token = "ghp-test"
+    fake.github_webhook_secret = "gh-secret"
+    fake.openai_api_key = "sk-test"
     fake.max_files_per_review = 50
     fake.max_inline_comments = 20
     fake.max_file_size_bytes = 200_000
@@ -75,9 +81,14 @@ async def test_health_token_not_configured(client: httpx.AsyncClient, monkeypatc
     fake = MagicMock()
     fake.gitlab_token = ""
     fake.webhook_secret = ""
+    fake.github_token = ""
+    fake.github_webhook_secret = ""
+    fake.openai_api_key = ""
     monkeypatch.setattr(main, "get_settings", lambda: fake)
     resp = await client.get("/")
     assert resp.json()["gitlab_configured"] is False
+    assert resp.json()["github_configured"] is False
+    assert resp.json()["llm_configured"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -251,3 +262,131 @@ async def test_safe_review_logs_error_result(monkeypatch):
         )
     monkeypatch.setattr(main, "run_merge_request_review", returning_error)
     await main._safe_review(42, 7)  # 不抛异常即可
+
+
+# ---------------------------------------------------------------------------
+# GitHub Webhook
+# ---------------------------------------------------------------------------
+
+_GITHUB_PAYLOAD = {
+    "action": "opened",
+    "number": 1,
+    "repository": {"full_name": "owner/repo"},
+}
+
+
+def _make_github_signature(body: bytes, secret: str) -> str:
+    import hashlib
+    import hmac
+    return "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+
+async def test_github_webhook_rejected_without_signature(client: httpx.AsyncClient, settings_with_secret):
+    """配置了 secret 但请求未带 X-Hub-Signature-256 -> 401。"""
+    resp = await client.post("/webhook/github", json=_GITHUB_PAYLOAD)
+    assert resp.status_code == 401
+
+
+async def test_github_webhook_rejected_wrong_signature(client: httpx.AsyncClient, settings_with_secret):
+    """X-Hub-Signature-256 不匹配 -> 401。"""
+    resp = await client.post(
+        "/webhook/github",
+        json=_GITHUB_PAYLOAD,
+        headers={"X-Hub-Signature-256": "sha256=bad", "X-GitHub-Event": "pull_request"},
+    )
+    assert resp.status_code == 401
+
+
+async def test_github_webhook_accepts_correct_signature(client: httpx.AsyncClient, settings_with_secret):
+    """签名正确但 event 不是 pull_request -> ignored。"""
+    import json
+    body = json.dumps({"action": "opened", "number": 1, "repository": {"full_name": "owner/repo"}}).encode()
+    sig = _make_github_signature(body, "gh-secret")
+    resp = await client.post(
+        "/webhook/github",
+        content=body,
+        headers={
+            "X-Hub-Signature-256": sig,
+            "X-GitHub-Event": "push",
+            "Content-Type": "application/json",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ignored"
+
+
+async def test_github_webhook_ignores_unsupported_action(client: httpx.AsyncClient, settings_no_secret):
+    resp = await client.post(
+        "/webhook/github",
+        json={"action": "closed", "number": 1, "repository": {"full_name": "owner/repo"}},
+        headers={"X-GitHub-Event": "pull_request"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ignored"
+    assert "closed" in body["reason"]
+
+
+async def test_github_webhook_accepts_trigger_actions(client: httpx.AsyncClient, settings_no_secret):
+    """opened/reopened/synchronize 应被接受。"""
+    import json
+    for action in ("opened", "reopened", "synchronize"):
+        payload = {"action": action, "number": 5, "repository": {"full_name": "owner/repo"}}
+        with patch.object(main, "_safe_github_review", new=AsyncMock()):
+            resp = await client.post(
+                "/webhook/github",
+                json=payload,
+                headers={"X-GitHub-Event": "pull_request"},
+            )
+        assert resp.status_code == 200, f"action={action}"
+        body = resp.json()
+        assert body["status"] == "accepted"
+        assert body["pr_number"] == 5
+        assert body["owner"] == "owner"
+        assert body["repo"] == "repo"
+        assert body["action"] == action
+
+
+async def test_github_webhook_missing_repo_full_name(client: httpx.AsyncClient, settings_no_secret):
+    resp = await client.post(
+        "/webhook/github",
+        json={"action": "opened", "number": 1},
+        headers={"X-GitHub-Event": "pull_request"},
+    )
+    assert resp.status_code == 400
+
+
+async def test_github_webhook_triggers_background_review(client: httpx.AsyncClient, settings_no_secret):
+    """webhook 应异步触发 _safe_github_review。"""
+    import asyncio
+    with patch.object(main, "_safe_github_review", new=AsyncMock()) as mock_review:
+        resp = await client.post(
+            "/webhook/github",
+            json={"action": "opened", "number": 7, "repository": {"full_name": "owner/repo"}},
+            headers={"X-GitHub-Event": "pull_request"},
+        )
+    assert resp.status_code == 200
+    await asyncio.sleep(0.05)
+    mock_review.assert_called_once_with("owner", "repo", 7)
+
+
+async def test_safe_github_review_handles_error(monkeypatch):
+    """_safe_github_review 捕获异常不抛出。"""
+    async def boom(*a, **kw):
+        raise RuntimeError("crash")
+    monkeypatch.setattr(main, "run_github_pr_review", boom)
+    await main._safe_github_review("owner", "repo", 1)
+
+
+async def test_safe_github_review_logs_error_result(monkeypatch):
+    """_safe_github_review 在 result.error 时记录日志（不抛出）。"""
+    from mcp_server import GitHubReviewResult
+    async def returning_error(*a, **kw):
+        return GitHubReviewResult(
+            owner="owner", repo="repo", pr_number=1,
+            reviewed_files=0, skipped_files=0, findings=[],
+            inline_comments_posted=0, summary_posted=False,
+            error="something wrong",
+        )
+    monkeypatch.setattr(main, "run_github_pr_review", returning_error)
+    await main._safe_github_review("owner", "repo", 1)

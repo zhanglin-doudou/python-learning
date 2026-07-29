@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
 from typing import Any
@@ -16,7 +17,7 @@ from typing import Any
 from fastapi import FastAPI, Header, HTTPException, Request
 
 from config import get_settings
-from mcp_server import list_rules, mcp, run_merge_request_review
+from mcp_server import list_rules, mcp, run_github_pr_review, run_merge_request_review
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,7 +54,10 @@ def health() -> dict[str, Any]:
         "status": "ok",
         "mcp_endpoint": "/mcp",
         "gitlab_configured": bool(settings.gitlab_token),
-        "webhook_secret_configured": bool(settings.webhook_secret),
+        "github_configured": bool(settings.github_token),
+        "llm_configured": bool(settings.openai_api_key),
+        "gitlab_webhook_secret_configured": bool(settings.webhook_secret),
+        "github_webhook_secret_configured": bool(settings.github_webhook_secret),
     }
 
 
@@ -121,6 +125,92 @@ async def _safe_review(project_id: int | str, mr_iid: int) -> None:
             )
     except Exception:
         logger.exception("审查任务异常 project=%s mr=!%s", project_id, mr_iid)
+
+
+# ---------------------------------------------------------------------------
+# GitHub Webhook
+# ---------------------------------------------------------------------------
+
+_GITHUB_TRIGGER_ACTIONS = {"opened", "reopened", "synchronize"}
+
+
+def _verify_github_signature(body: bytes, signature: str, secret: str) -> bool:
+    """验证 GitHub webhook HMAC-SHA256 签名。"""
+    import hashlib
+    import hmac
+
+    if not signature.startswith("sha256="):
+        return False
+    expected = "sha256=" + hmac.new(
+        secret.encode(), body, hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature)
+
+
+@app.post("/webhook/github")
+async def github_webhook(
+    request: Request,
+    x_hub_signature_256: str | None = Header(default=None),
+    x_github_event: str | None = Header(default=None),
+) -> dict[str, Any]:
+    settings = get_settings()
+
+    # 校验 webhook secret（若配置了）
+    if settings.github_webhook_secret:
+        body = await request.body()
+        if not x_hub_signature_256:
+            raise HTTPException(status_code=401, detail="missing X-Hub-Signature-256")
+        if not _verify_github_signature(body, x_hub_signature_256, settings.github_webhook_secret):
+            raise HTTPException(status_code=401, detail="invalid X-Hub-Signature-256")
+        # 重新解析 body（因为 request.body() 已被消费）
+        try:
+            payload = json.loads(body)
+        except Exception:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+    else:
+        logger.warning("GITHUB_WEBHOOK_SECRET 未配置，跳过 webhook 校验（仅限开发环境）")
+        try:
+            payload = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+
+    if x_github_event != "pull_request":
+        return {"status": "ignored", "reason": f"event={x_github_event} not pull_request"}
+
+    action = payload.get("action")
+    if action not in _GITHUB_TRIGGER_ACTIONS:
+        return {"status": "ignored", "reason": f"action={action} not in {_GITHUB_TRIGGER_ACTIONS}"}
+
+    pr_number = payload.get("number")
+    repo_full_name = (payload.get("repository") or {}).get("full_name", "")
+    if not pr_number or not repo_full_name or "/" not in repo_full_name:
+        raise HTTPException(status_code=400, detail="missing pr number or repo full_name")
+
+    owner, repo = repo_full_name.split("/", 1)
+
+    # 异步执行审查，立即返回 200，避免 webhook 超时
+    task = asyncio.create_task(_safe_github_review(owner, repo, pr_number))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+    logger.info("GitHub webhook 触发审查: %s/%s PR#%s action=%s", owner, repo, pr_number, action)
+    return {"status": "accepted", "owner": owner, "repo": repo, "pr_number": pr_number, "action": action}
+
+
+async def _safe_github_review(owner: str, repo: str, pr_number: int) -> None:
+    """包装 GitHub PR 审查任务，捕获异常并记录日志。"""
+    try:
+        result = await run_github_pr_review(owner, repo, pr_number, post_comments=True)
+        if result.error:
+            logger.error("GitHub PR 审查 %s/%s#%d 失败: %s", owner, repo, pr_number, result.error)
+        else:
+            logger.info(
+                "GitHub PR 审查完成 %s/%s#%d: 审查 %d 文件, 发现 %d 问题, 行内评论 %d, 汇总=%s, tokens=%s",
+                owner, repo, pr_number, result.reviewed_files, len(result.findings),
+                result.inline_comments_posted, result.summary_posted, result.llm_tokens_used,
+            )
+    except Exception:
+        logger.exception("GitHub PR 审查任务异常 %s/%s#%d", owner, repo, pr_number)
 
 
 # 挂载 MCP streamable HTTP 端点（端点路径为 /mcp）

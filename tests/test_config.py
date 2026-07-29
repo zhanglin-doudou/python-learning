@@ -16,6 +16,9 @@ def test_defaults(monkeypatch):
     """未设置任何环境变量时使用默认值。"""
     for key in (
         "GITLAB_URL", "GITLAB_TOKEN", "GITLAB_WEBHOOK_SECRET",
+        "GITHUB_TOKEN", "GITHUB_WEBHOOK_SECRET",
+        "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL",
+        "LLM_MAX_TOKENS", "LLM_TEMPERATURE",
         "MAX_FILES_PER_REVIEW", "MAX_INLINE_COMMENTS", "MAX_FILE_SIZE_BYTES",
         "HOST", "PORT",
     ):
@@ -26,6 +29,13 @@ def test_defaults(monkeypatch):
     assert s.gitlab_url == "https://gitlab.com"
     assert s.gitlab_token == ""
     assert s.webhook_secret == ""
+    assert s.github_token == ""
+    assert s.github_webhook_secret == ""
+    assert s.openai_api_key == ""
+    assert s.openai_base_url == ""
+    assert s.openai_model == "GLM-4.5-Air"
+    assert s.llm_max_tokens == 4096
+    assert s.llm_temperature == 0.2
     assert s.max_files_per_review == 50
     assert s.max_inline_comments == 20
     assert s.max_file_size_bytes == 200_000
@@ -38,6 +48,13 @@ def test_env_overrides(monkeypatch):
     monkeypatch.setenv("GITLAB_URL", "https://gitlab.example.com/")
     monkeypatch.setenv("GITLAB_TOKEN", "glpat-xxx")
     monkeypatch.setenv("GITLAB_WEBHOOK_SECRET", "secret")
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp-xxx")
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "gh-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.example.com/v1")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-4o")
+    monkeypatch.setenv("LLM_MAX_TOKENS", "2048")
+    monkeypatch.setenv("LLM_TEMPERATURE", "0.5")
     monkeypatch.setenv("MAX_FILES_PER_REVIEW", "5")
     monkeypatch.setenv("MAX_INLINE_COMMENTS", "3")
     monkeypatch.setenv("MAX_FILE_SIZE_BYTES", "1024")
@@ -49,6 +66,13 @@ def test_env_overrides(monkeypatch):
     assert s.gitlab_url == "https://gitlab.example.com"  # 末尾斜杠被去掉
     assert s.gitlab_token == "glpat-xxx"
     assert s.webhook_secret == "secret"
+    assert s.github_token == "ghp-xxx"
+    assert s.github_webhook_secret == "gh-secret"
+    assert s.openai_api_key == "sk-test"
+    assert s.openai_base_url == "https://api.example.com/v1"
+    assert s.openai_model == "gpt-4o"
+    assert s.llm_max_tokens == 2048
+    assert s.llm_temperature == 0.5
     assert s.max_files_per_review == 5
     assert s.max_inline_comments == 3
     assert s.max_file_size_bytes == 1024
@@ -94,6 +118,9 @@ def test_validate_missing_url(monkeypatch):
     # gitlab_url 有默认值，无法通过环境变量置空，直接构造测试 validate 逻辑
     s = mod.Settings(
         gitlab_url="", gitlab_token="tok", webhook_secret="",
+        github_token="", github_webhook_secret="",
+        openai_api_key="", openai_base_url="", openai_model="GLM-4.5-Air",
+        llm_max_tokens=4096, llm_temperature=0.2,
         max_files_per_review=50, max_inline_comments=20,
         max_file_size_bytes=200_000, host="0.0.0.0", port=8000,
     )
