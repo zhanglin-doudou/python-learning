@@ -8,5 +8,6 @@ wheels/
 
 # env files
 .env
+.env.local
 # Virtual environments
 .venv
