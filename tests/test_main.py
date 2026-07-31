@@ -16,6 +16,7 @@ from mcp_server import ReviewResult
 @pytest.fixture
 def settings_no_secret(monkeypatch):
     """配置 token 但不设 webhook secret（跳过校验）。"""
+    import config
     fake = MagicMock()
     fake.gitlab_url = "https://gitlab.example.com"
     fake.gitlab_token = "tok"
@@ -28,13 +29,15 @@ def settings_no_secret(monkeypatch):
     fake.max_file_size_bytes = 200_000
     fake.host = "0.0.0.0"
     fake.port = 8000
-    monkeypatch.setattr(main, "get_settings", lambda: fake)
+    monkeypatch.setattr(config, "settings", fake)
+    monkeypatch.setattr(main, "settings", fake)
     return fake
 
 
 @pytest.fixture
 def settings_with_secret(monkeypatch):
     """配置 token 与 webhook secret。"""
+    import config
     fake = MagicMock()
     fake.gitlab_url = "https://gitlab.example.com"
     fake.gitlab_token = "tok"
@@ -47,7 +50,8 @@ def settings_with_secret(monkeypatch):
     fake.max_file_size_bytes = 200_000
     fake.host = "0.0.0.0"
     fake.port = 8000
-    monkeypatch.setattr(main, "get_settings", lambda: fake)
+    monkeypatch.setattr(config, "settings", fake)
+    monkeypatch.setattr(main, "settings", fake)
     return fake
 
 
@@ -78,13 +82,15 @@ async def test_health_ok(client: httpx.AsyncClient, settings_no_secret):
 
 
 async def test_health_token_not_configured(client: httpx.AsyncClient, monkeypatch):
+    import config
     fake = MagicMock()
     fake.gitlab_token = ""
     fake.webhook_secret = ""
     fake.github_token = ""
     fake.github_webhook_secret = ""
     fake.openai_api_key = ""
-    monkeypatch.setattr(main, "get_settings", lambda: fake)
+    monkeypatch.setattr(config, "settings", fake)
+    monkeypatch.setattr(main, "settings", fake)
     resp = await client.get("/")
     assert resp.json()["gitlab_configured"] is False
     assert resp.json()["github_configured"] is False

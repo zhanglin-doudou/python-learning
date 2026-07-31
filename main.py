@@ -16,7 +16,7 @@ from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request
 
-from config import get_settings
+from config import settings
 from mcp_server import list_rules, mcp, run_github_pr_review, run_merge_request_review
 
 logging.basicConfig(
@@ -48,7 +48,6 @@ _background_tasks: set[asyncio.Task[Any]] = set()
 
 @app.get("/")
 def health() -> dict[str, Any]:
-    settings = get_settings()
     return {
         "service": "nextjs-review-mcp",
         "status": "ok",
@@ -75,7 +74,6 @@ async def gitlab_webhook(
     request: Request,
     x_gitlab_token: str | None = Header(default=None, alias="X-Gitlab-Token"),
 ) -> dict[str, Any]:
-    settings = get_settings()
 
     # 校验 webhook secret（若配置了）
     if settings.webhook_secret:
@@ -153,7 +151,6 @@ async def github_webhook(
     x_hub_signature_256: str | None = Header(default=None),
     x_github_event: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    settings = get_settings()
 
     # 校验 webhook secret（若配置了）
     if settings.github_webhook_secret:
@@ -221,5 +218,4 @@ app.mount("/", mcp.streamable_http_app())
 if __name__ == "__main__":
     import uvicorn
 
-    settings = get_settings()
     uvicorn.run("main:app", host=settings.host, port=settings.port, reload=False)

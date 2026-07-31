@@ -46,7 +46,8 @@ def _mock_gl_factory(mr, changes, file_contents):
 
 
 def _patch_settings(monkeypatch, token="tok", secret="", github_token="ghp-test", openai_key="sk-test"):
-    """patch get_settings 返回带 token 的配置。"""
+    """patch settings 返回带 token 的配置。"""
+    import config
     fake = MagicMock()
     fake.gitlab_url = "https://gitlab.example.com"
     fake.gitlab_token = token
@@ -63,9 +64,11 @@ def _patch_settings(monkeypatch, token="tok", secret="", github_token="ghp-test"
     fake.max_file_size_bytes = 200_000
     fake.host = "0.0.0.0"
     fake.port = 8000
-    monkeypatch.setattr(mcp_server, "get_settings", lambda: fake)
+    # patch config.settings，所有模块导入的是同一个对象
+    monkeypatch.setattr(config, "settings", fake)
+    monkeypatch.setattr(mcp_server, "settings", fake)
     import llm_client
-    monkeypatch.setattr(llm_client, "get_settings", lambda: fake)
+    monkeypatch.setattr(llm_client, "settings", fake)
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +166,7 @@ async def test_review_skips_unsupported_extensions(monkeypatch):
 
 async def test_review_skips_large_files(monkeypatch):
     """超过大小限制的文件跳过。"""
-    _patch_settings(monkeypatch)
+    import config
     fake = MagicMock()
     fake.gitlab_url = "https://gitlab.example.com"
     fake.gitlab_token = "tok"
@@ -173,7 +176,8 @@ async def test_review_skips_large_files(monkeypatch):
     fake.webhook_secret = ""
     fake.host = "0.0.0.0"
     fake.port = 8000
-    monkeypatch.setattr(mcp_server, "get_settings", lambda: fake)
+    monkeypatch.setattr(config, "settings", fake)
+    monkeypatch.setattr(mcp_server, "settings", fake)
 
     diff = "@@ -0,0 +1,1 @@\n+import { Icon } from \"react-icons\";\n"
     change = _make_change("a.ts", diff)
@@ -270,6 +274,7 @@ async def test_review_post_comments_false(monkeypatch):
 
 async def test_review_inline_comment_limit(monkeypatch):
     """行内评论达到上限后停止发送。"""
+    import config
     fake = MagicMock()
     fake.gitlab_url = "https://gitlab.example.com"
     fake.gitlab_token = "tok"
@@ -279,7 +284,8 @@ async def test_review_inline_comment_limit(monkeypatch):
     fake.webhook_secret = ""
     fake.host = "0.0.0.0"
     fake.port = 8000
-    monkeypatch.setattr(mcp_server, "get_settings", lambda: fake)
+    monkeypatch.setattr(config, "settings", fake)
+    monkeypatch.setattr(mcp_server, "settings", fake)
 
     # 多个文件多个问题
     diffs = []
@@ -494,6 +500,7 @@ async def test_github_review_skips_unsupported_extensions(monkeypatch):
 
 async def test_github_review_skips_large_files(monkeypatch):
     """超过大小限制的文件跳过。"""
+    import config
     fake = MagicMock()
     fake.gitlab_url = "https://gitlab.example.com"
     fake.gitlab_token = "tok"
@@ -510,9 +517,10 @@ async def test_github_review_skips_large_files(monkeypatch):
     fake.max_file_size_bytes = 10  # 极小限制
     fake.host = "0.0.0.0"
     fake.port = 8000
-    monkeypatch.setattr(mcp_server, "get_settings", lambda: fake)
+    monkeypatch.setattr(config, "settings", fake)
+    monkeypatch.setattr(mcp_server, "settings", fake)
     import llm_client
-    monkeypatch.setattr(llm_client, "get_settings", lambda: fake)
+    monkeypatch.setattr(llm_client, "settings", fake)
 
     patch_text = "@@ -0,0 +1,1 @@\n+import { Icon } from \"react-icons\";"
     pr_file = _make_pr_file("a.ts", patch_text)

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 from mcp.server.fastmcp import FastMCP
 
-from config import get_settings
+from config import settings
 from github_client import GitHubClient, GitHubError, parse_patch_positions
 from gitlab_client import GitLabClient, GitLabError
 from llm_client import LLMClient
@@ -58,7 +58,6 @@ async def run_merge_request_review(
 
     被 MCP 工具与 GitLab webhook 共用。
     """
-    settings = get_settings()
     if not settings.gitlab_token:
         return ReviewResult(
             project_id=project_id, mr_iid=mr_iid, reviewed_files=0,
@@ -195,7 +194,7 @@ async def run_github_pr_review(
 
     被 MCP 工具与 GitHub webhook 共用。
     """
-    settings = get_settings()
+    
     if not settings.github_token:
         return GitHubReviewResult(
             owner=owner, repo=repo, pr_number=pr_number,
@@ -410,7 +409,6 @@ async def post_mr_comment(project_id: int, mr_iid: int, comment: str) -> str:
       mr_iid: Merge Request 的 iid
       comment: 评论内容（支持 markdown）
     """
-    settings = get_settings()
     if not settings.gitlab_token:
         return "❌ GITLAB_TOKEN 未配置，无法发表评论。"
     async with GitLabClient(settings.gitlab_url, settings.gitlab_token) as gl:

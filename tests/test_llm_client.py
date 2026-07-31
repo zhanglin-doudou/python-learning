@@ -150,13 +150,15 @@ def test_build_user_prompt_none_for_empty_patch():
 
 async def test_llm_client_review_file_success(monkeypatch):
     """成功调用 OpenAI API 并解析返回的 JSON。"""
+    import config
     fake_settings = MagicMock()
     fake_settings.openai_api_key = "sk-test"
     fake_settings.openai_base_url = ""
     fake_settings.openai_model = "GLM-4.5-Air"
     fake_settings.llm_max_tokens = 4096
     fake_settings.llm_temperature = 0.2
-    monkeypatch.setattr("llm_client.get_settings", lambda: fake_settings)
+    monkeypatch.setattr(config, "settings", fake_settings)
+    monkeypatch.setattr("llm_client.settings", fake_settings)
 
     mock_response = MagicMock()
     mock_response.choices = [MagicMock()]
@@ -181,13 +183,15 @@ async def test_llm_client_review_file_success(monkeypatch):
 
 async def test_llm_client_review_file_empty_patch(monkeypatch):
     """空 patch 时不调用 API，直接返回空结果。"""
+    import config
     fake_settings = MagicMock()
     fake_settings.openai_api_key = "sk-test"
     fake_settings.openai_base_url = ""
     fake_settings.openai_model = "GLM-4.5-Air"
     fake_settings.llm_max_tokens = 4096
     fake_settings.llm_temperature = 0.2
-    monkeypatch.setattr("llm_client.get_settings", lambda: fake_settings)
+    monkeypatch.setattr(config, "settings", fake_settings)
+    monkeypatch.setattr("llm_client.settings", fake_settings)
 
     mock_openai = MagicMock()
     mock_openai.chat.completions.create = AsyncMock()
@@ -204,13 +208,15 @@ async def test_llm_client_review_file_empty_patch(monkeypatch):
 
 async def test_llm_client_review_file_api_error(monkeypatch):
     """API 调用失败时返回空 findings 并记录错误。"""
+    import config
     fake_settings = MagicMock()
     fake_settings.openai_api_key = "sk-test"
     fake_settings.openai_base_url = ""
     fake_settings.openai_model = "GLM-4.5-Air"
     fake_settings.llm_max_tokens = 4096
     fake_settings.llm_temperature = 0.2
-    monkeypatch.setattr("llm_client.get_settings", lambda: fake_settings)
+    monkeypatch.setattr(config, "settings", fake_settings)
+    monkeypatch.setattr("llm_client.settings", fake_settings)
 
     mock_openai = MagicMock()
     mock_openai.chat.completions.create = AsyncMock(side_effect=RuntimeError("API down"))
@@ -225,13 +231,15 @@ async def test_llm_client_review_file_api_error(monkeypatch):
 
 async def test_llm_client_review_file_wraps_findings_object(monkeypatch):
     """LLM 返回 {'findings': [...]} 对象时也能正确解析。"""
+    import config
     fake_settings = MagicMock()
     fake_settings.openai_api_key = "sk-test"
     fake_settings.openai_base_url = ""
     fake_settings.openai_model = "GLM-4.5-Air"
     fake_settings.llm_max_tokens = 4096
     fake_settings.llm_temperature = 0.2
-    monkeypatch.setattr("llm_client.get_settings", lambda: fake_settings)
+    monkeypatch.setattr(config, "settings", fake_settings)
+    monkeypatch.setattr("llm_client.settings", fake_settings)
 
     mock_response = MagicMock()
     mock_response.choices = [MagicMock()]

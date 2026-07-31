@@ -569,6 +569,7 @@ dependencies = [
     { name = "httpx" },
     { name = "mcp" },
     { name = "openai" },
+    { name = "pydantic-settings" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -585,6 +586,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "mcp", specifier = ">=1.2.0" },
     { name = "openai", specifier = ">=1.0.0" },
+    { name = "pydantic-settings", specifier = ">=2.14.2" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.39.0" },
 ]
 

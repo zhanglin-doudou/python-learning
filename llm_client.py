@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from openai import AsyncOpenAI
 
-from config import get_settings
+from config import settings
 from reviewer import Finding
 
 logger = logging.getLogger(__name__)
@@ -143,7 +143,6 @@ class LLMClient:
     """基于 OpenAI API 的代码审查 LLM 客户端。"""
 
     def __init__(self) -> None:
-        settings = get_settings()
         kwargs: dict = {"api_key": settings.openai_api_key}
         if settings.openai_base_url:
             kwargs["base_url"] = settings.openai_base_url
